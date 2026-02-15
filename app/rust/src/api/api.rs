@@ -73,9 +73,19 @@ fn reload_main_map_bitmap(
         (false, false) => None,
     };
 
-    let journey_bitmap = storage
-        .get_latest_bitmap_for_main_map_renderer(&layer_kind, layer_filter.current_journey)?;
-    main_map_renderer.replace(journey_bitmap);
+    let (lazy_source, ongoing_bitmap) =
+        storage.get_latest_bitmap_lazy(&layer_kind, layer_filter.current_journey)?;
+
+    match lazy_source {
+        Some(lazy) => {
+            // Cache hit — use lazy loading (fast: no tile decompression yet)
+            main_map_renderer.replace_lazy(lazy, ongoing_bitmap);
+        }
+        None => {
+            // Cache miss — full bitmap was computed eagerly (also populated cache)
+            main_map_renderer.replace(ongoing_bitmap);
+        }
+    }
     Ok(())
 }
 
@@ -277,16 +287,15 @@ pub enum MapRendererProxy {
 }
 
 impl MapRendererProxy {
-    pub fn handle_webview_requests(&self, request: String) -> Result<String> {
+    pub fn handle_webview_requests(&mut self, request: String) -> Result<String> {
         let request = Request::parse(&request)?;
         let response = match self {
-            MapRendererProxy::Renderer(map_renderer) => {
-                // Directly use the map renderer reference
+            MapRendererProxy::Renderer(ref mut map_renderer) => {
                 request.handle(map_renderer)
             }
             MapRendererProxy::MainMapRenderer => {
-                let map_renderer = get().main_map_renderer.lock().unwrap();
-                request.handle(&map_renderer)
+                let mut map_renderer = get().main_map_renderer.lock().unwrap();
+                request.handle(&mut map_renderer)
             }
         };
         serde_json::to_string(&response)

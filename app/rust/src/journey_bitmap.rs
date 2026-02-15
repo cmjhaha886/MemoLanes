@@ -321,6 +321,22 @@ impl Tile {
         self.blocks[block_key.index()].as_deref()
     }
 
+    /// Merge another tile's blocks into self using bitwise OR per block.
+    pub fn merge_from(&mut self, other: &Tile) {
+        for (i, other_block_opt) in other.blocks.iter().enumerate() {
+            if let Some(other_block) = other_block_opt {
+                match &mut self.blocks[i] {
+                    Some(self_block) => {
+                        self_block.merge_with(other_block.as_ref());
+                    }
+                    None => {
+                        self.blocks[i] = Some(other_block.clone());
+                    }
+                }
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         for b in &self.blocks {
             if b.is_some() {

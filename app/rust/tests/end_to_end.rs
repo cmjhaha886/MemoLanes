@@ -39,9 +39,9 @@ fn basic() {
 
     // we have both ongoing journey and finalized journey at this point
     {
-        let map_renderer = map_renderer.lock().unwrap();
+        let mut map_renderer = map_renderer.lock().unwrap();
         let render_result =
-            test_utils::render_map_overlay(&map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
+            test_utils::render_map_overlay(&mut map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
         drop(map_renderer);
         test_utils::verify_image("end_to_end_basic_0", &render_result.data);
     }
@@ -56,9 +56,9 @@ fn basic() {
     }
 
     {
-        let map_renderer = map_renderer.lock().unwrap();
+        let mut map_renderer = map_renderer.lock().unwrap();
         let render_result =
-            test_utils::render_map_overlay(&map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
+            test_utils::render_map_overlay(&mut map_renderer, 11, 121.39, 31.3146, 121.55, 31.18);
         drop(map_renderer);
         test_utils::verify_image("end_to_end_basic_1", &render_result.data);
     }

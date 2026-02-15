@@ -93,6 +93,19 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Get raw serialized blob bytes from cache without deserializing.
+    pub fn get_full_journey_cache_raw(&self, layer_kind: &LayerKind) -> Result<Option<Vec<u8>>> {
+        let sql = "SELECT data FROM `journey_cache__full` WHERE kind = ?1;";
+        let mut query = self.conn.prepare(sql)?;
+        let data = query
+            .query_row((layer_kind.to_sql(),), |row| {
+                let blob = row.get_ref(0)?.as_blob()?;
+                Ok(blob.to_vec())
+            })
+            .optional()?;
+        Ok(data)
+    }
+
     fn get_full_journey_cache(&self, layer_kind: &LayerKind) -> Result<Option<JourneyBitmap>> {
         let sql = "SELECT data FROM `journey_cache__full` WHERE kind = ?1;";
 

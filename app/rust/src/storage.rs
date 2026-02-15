@@ -6,6 +6,7 @@ use crate::journey_data::JourneyData;
 use crate::journey_header::JourneyKind;
 use crate::main_db::{self, Action, MainDb};
 use crate::merged_journey_builder;
+use crate::renderer::map_renderer::LazyTileSource;
 use anyhow::{Context, Ok, Result};
 use auto_context::auto_context;
 use chrono::Local;
@@ -360,6 +361,26 @@ impl Storage {
         drop(dbs);
 
         Ok(journey_bitmap)
+    }
+
+    /// Lazy variant: returns a LazyTileSource (if cache exists) + a small ongoing bitmap,
+    /// or falls back to a full eager bitmap when no cache is available.
+    #[auto_context]
+    pub fn get_latest_bitmap_lazy(
+        &self,
+        layer_kind: &Option<LayerKind>,
+        include_ongoing: bool,
+    ) -> Result<(Option<LazyTileSource>, JourneyBitmap)> {
+        let mut dbs = self.dbs.lock().unwrap();
+        let (ref mut main_db, ref cache_db) = *dbs;
+        let result = merged_journey_builder::get_latest_lazy(
+            main_db,
+            cache_db,
+            layer_kind,
+            include_ongoing,
+        )?;
+        drop(dbs);
+        Ok(result)
     }
 
     #[auto_context]

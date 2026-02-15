@@ -6,11 +6,19 @@ use flutter_rust_bridge::frb;
 use integer_encoding::*;
 use itertools::Itertools;
 
+use std::collections::HashMap;
+
 use crate::{
     journey_bitmap::{self, Block, BlockKey, JourneyBitmap, Tile},
     journey_header::JourneyType,
     journey_vector::{JourneyVector, TrackPoint, TrackSegment},
 };
+
+/// Location of a tile within a serialized bitmap blob.
+pub struct TileLocation {
+    pub offset: usize,
+    pub length: usize,
+}
 
 #[derive(Debug, PartialEq, Clone)]
 #[frb(opaque)]
@@ -142,7 +150,7 @@ pub fn serialize_journey_bitmap<T: Write>(
 }
 
 #[auto_context]
-fn deserialize_tile<T: Read>(reader: T) -> Result<Tile> {
+pub fn deserialize_tile<T: Read>(reader: T) -> Result<Tile> {
     let mut decoder = zstd::Decoder::new(reader)?;
     let mut tile = Tile::new();
     let mut block_keys =
@@ -184,6 +192,37 @@ pub fn deserialize_journey_bitmap<T: Read>(mut reader: T) -> Result<JourneyBitma
     }
 
     Ok(journey_bitmap)
+}
+
+/// Parse tile index from a serialized bitmap blob without decompressing any tile data.
+/// Returns a map of (tile_x, tile_y) -> TileLocation { offset, length } within the blob.
+#[auto_context]
+pub fn parse_tile_index(data: &[u8]) -> Result<HashMap<(u16, u16), TileLocation>> {
+    let mut reader = std::io::Cursor::new(data);
+    validate_magic_header(&mut reader, &JOURNEY_BITMAP_MAGIC_HEADER)?;
+
+    let tiles_count: u64 = reader.read_varint()?;
+    let mut index = HashMap::with_capacity(tiles_count as usize);
+
+    for _ in 0..tiles_count {
+        let mut buf: [u8; 2] = [0; 2];
+        reader.read_exact(&mut buf)?;
+        let tile_x = u16::from_be_bytes(buf);
+
+        reader.read_exact(&mut buf)?;
+        let tile_y = u16::from_be_bytes(buf);
+
+        let tile_data_len: u64 = reader.read_varint()?;
+        let offset = reader.position() as usize;
+        let length = tile_data_len as usize;
+
+        index.insert((tile_x, tile_y), TileLocation { offset, length });
+
+        // Skip over tile data without decompressing
+        reader.set_position(reader.position() + tile_data_len);
+    }
+
+    Ok(index)
 }
 
 impl JourneyData {

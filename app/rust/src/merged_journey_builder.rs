@@ -9,6 +9,7 @@ use crate::{
     journey_header::JourneyKind,
     journey_vector::JourneyVector,
     main_db::{self, MainDb},
+    renderer::map_renderer::LazyTileSource,
 };
 use anyhow::{Context, Result};
 use auto_context::auto_context;
@@ -134,4 +135,59 @@ pub fn get_latest(
         assert_eq!(txn.action, None);
         Ok(journey_bitmap)
     })
+}
+
+/// Lazy variant of `get_latest` for the main map.
+///
+/// - **Cache hit:** Returns `(Some(LazyTileSource), ongoing_bitmap)`.
+///   The LazyTileSource holds the compressed finalized data and decompresses
+///   tiles on demand. The ongoing_bitmap is a small bitmap with just the
+///   current recording (if any).
+///
+/// - **Cache miss:** Falls back to eager computation via `get_latest`, populates
+///   the cache, and returns `(None, full_bitmap)`.
+#[auto_context]
+pub fn get_latest_lazy(
+    main_db: &mut MainDb,
+    cache_db: &CacheDb,
+    layer_kind: &Option<LayerKind>,
+    include_ongoing: bool,
+) -> Result<(Option<LazyTileSource>, JourneyBitmap)> {
+    // Try to get the raw cache blob for the effective layer kind
+    let raw_blob = match layer_kind {
+        Some(lk) => {
+            // For LayerKind::All, we need the "All" cache specifically
+            cache_db.get_full_journey_cache_raw(lk)?
+        }
+        None => None,
+    };
+
+    match raw_blob {
+        Some(data) => {
+            // Cache hit — build lazy source without decompressing any tiles
+            let lazy_source = LazyTileSource::from_serialized_bitmap(data)?;
+
+            // Build the (small) ongoing journey bitmap
+            let mut ongoing_bitmap = JourneyBitmap::new();
+            if include_ongoing {
+                main_db.with_txn(|txn| {
+                    if let Some(journey_vector) = txn.get_ongoing_journey(None)? {
+                        add_journey_vector_to_journey_bitmap(
+                            &mut ongoing_bitmap,
+                            &journey_vector,
+                        );
+                    }
+                    assert_eq!(txn.action, None);
+                    Ok(())
+                })?;
+            }
+
+            Ok((Some(lazy_source), ongoing_bitmap))
+        }
+        None => {
+            // Cache miss — fall back to full eager loading (also populates cache)
+            let full_bitmap = get_latest(main_db, cache_db, layer_kind, include_ongoing)?;
+            Ok((None, full_bitmap))
+        }
+    }
 }

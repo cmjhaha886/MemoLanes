@@ -83,9 +83,9 @@ mod tests {
 
         // Create a dummy map renderer for testing
         let journey_bitmap = JourneyBitmap::new();
-        let map_renderer = MapRenderer::new(journey_bitmap);
+        let mut map_renderer = MapRenderer::new(journey_bitmap);
 
-        let response = request.handle(&map_renderer);
+        let response = request.handle(&mut map_renderer);
 
         // Verify response structure
         assert_eq!(response.request_id, "test-123");
@@ -126,7 +126,7 @@ mod tests {
 
         // Create a dummy journey bitmap
         let journey_bitmap = JourneyBitmap::new();
-        let map_renderer = MapRenderer::new(journey_bitmap);
+        let mut map_renderer = MapRenderer::new(journey_bitmap);
 
         // Create tile range request
         let request_json = r#"{
@@ -144,7 +144,7 @@ mod tests {
         }"#;
 
         let request = Request::parse(request_json).expect("Failed to parse request");
-        let response = request.handle(&map_renderer);
+        let response = request.handle(&mut map_renderer);
 
         // Verify response structure
         assert_eq!(response.request_id, "test-version-123");
@@ -176,7 +176,7 @@ mod tests {
 
         // Create a dummy journey bitmap
         let journey_bitmap = JourneyBitmap::new();
-        let map_renderer = MapRenderer::new(journey_bitmap);
+        let mut map_renderer = MapRenderer::new(journey_bitmap);
         let version = map_renderer.get_version_string();
 
         // Create tile range query with current version (should trigger 304)
@@ -190,7 +190,7 @@ mod tests {
             cached_version: Some(version), // Use current version to trigger no-change scenario
         };
 
-        let response = handle_tile_range_query(&query, &map_renderer);
+        let response = handle_tile_range_query(&query, &mut map_renderer);
 
         // Verify 304 response
         assert!(response.is_ok(), "Expected successful response");
@@ -213,21 +213,20 @@ mod tests {
 /// Handle TileRangeQuery with a MapRenderer reference
 pub fn handle_tile_range_query(
     query: &TileRangeQuery,
-    map_renderer: &MapRenderer,
+    map_renderer: &mut MapRenderer,
 ) -> Result<TileRangeResponse, String> {
-    // Get the latest bitmap if it has changed
-    let (_, version) =
-        match map_renderer.get_latest_bitmap_if_changed(query.cached_version.as_deref()) {
-            None => {
-                // No changes since client's cached version - return 304 status
-                return Ok(TileRangeResponse {
-                    status: 304,
-                    headers: HashMap::new(),
-                    body: Vec::new(),
-                });
-            }
-            Some((journey_bitmap, version)) => (journey_bitmap, version),
-        };
+    // Check if version has changed since client's cached version
+    let version = match map_renderer.has_changed_since(query.cached_version.as_deref()) {
+        None => {
+            // No changes since client's cached version - return 304 status
+            return Ok(TileRangeResponse {
+                status: 304,
+                headers: HashMap::new(),
+                body: Vec::new(),
+            });
+        }
+        Some(version) => version,
+    };
 
     // Generate tile buffer from journey bitmap
     let tile_buffer = match map_renderer.get_tile_buffer(
@@ -267,7 +266,7 @@ impl Request {
     }
 
     /// Handle the request with a MapRenderer reference
-    pub fn handle(&self, map_renderer: &MapRenderer) -> RequestResponse<serde_json::Value> {
+    pub fn handle(&self, map_renderer: &mut MapRenderer) -> RequestResponse<serde_json::Value> {
         match &self.payload {
             RequestPayload::TileRange(query) => {
                 match handle_tile_range_query(query, map_renderer) {

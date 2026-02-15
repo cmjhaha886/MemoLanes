@@ -79,7 +79,7 @@ pub fn verify_image(name: &str, image: &Vec<u8>) {
 }
 
 pub fn render_map_overlay(
-    map_renderer: &MapRenderer,
+    map_renderer: &mut MapRenderer,
     // map view area (coordinates are in lat or lng)
     zoom: i32,
     left: f64,
@@ -87,6 +87,8 @@ pub fn render_map_overlay(
     right: f64,
     bottom: f64,
 ) -> RenderResult {
+    // Ensure all lazy tiles are loaded before rendering
+    map_renderer.ensure_all_tiles_loaded();
     let (mut left_idx, mut top_idx) = utils::lng_lat_to_tile_x_y(left, top, zoom);
     let (mut right_idx, mut bottom_idx) = utils::lng_lat_to_tile_x_y(right, bottom, zoom);
 
@@ -121,7 +123,7 @@ pub fn render_map_overlay(
 }
 
 fn render_map_overlay_internal(
-    map_renderer: &MapRenderer,
+    map_renderer: &mut MapRenderer,
     render_area: &RenderArea,
 ) -> RenderResult {
     /* for test, map_renderer initialized by MapRenderer::new, tilerenderer size is default size.  */
