@@ -1,4 +1,5 @@
 use crate::utils;
+use anyhow::Result;
 use bitvec::prelude::*;
 use std::{clone::Clone, collections::HashMap, mem::take};
 
@@ -24,16 +25,132 @@ pub const MIPMAP_BIT_SIZE: usize = {
 
 const ALL_OFFSET: i16 = TILE_WIDTH_OFFSET + BITMAP_WIDTH_OFFSET;
 
+/// Location of a tile's compressed data within `raw_data`.
+#[derive(Debug, Clone)]
+pub struct TileLocation {
+    pub offset: usize,
+    pub len: usize,
+}
+
 // we have 512*512 tiles, 128*128 blocks and a single block contains
 // a 64*64 bitmap.
-#[derive(PartialEq, Eq, Debug, Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct JourneyBitmap {
     pub tiles: HashMap<(u16, u16), Tile>,
+    /// Raw serialized data (everything after magic header + tile count).
+    /// Present only for lazily-loaded bitmaps.
+    raw_data: Option<Vec<u8>>,
+    /// Index from tile coords to their location in `raw_data`.
+    /// Entries are removed as tiles are loaded into `tiles`.
+    tile_index: HashMap<(u16, u16), TileLocation>,
 }
+
+impl PartialEq for JourneyBitmap {
+    fn eq(&self, other: &Self) -> bool {
+        if !self.tile_index.is_empty() || !other.tile_index.is_empty() {
+            // At least one side has lazy tiles — do a full comparison by
+            // cloning and loading everything.  This is only expected in tests.
+            let mut a = self.clone();
+            let mut b = other.clone();
+            a.ensure_all_tiles().expect("failed to load lazy tiles in eq");
+            b.ensure_all_tiles().expect("failed to load lazy tiles in eq");
+            return a.tiles == b.tiles;
+        }
+        self.tiles == other.tiles
+    }
+}
+
+impl Eq for JourneyBitmap {}
 
 impl JourneyBitmap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a lazily-loaded bitmap from raw serialized tile data and a
+    /// pre-parsed tile index.  No tile decompression happens here.
+    pub fn from_lazy(
+        raw_data: Vec<u8>,
+        tile_index: HashMap<(u16, u16), TileLocation>,
+    ) -> Self {
+        Self {
+            tiles: HashMap::new(),
+            raw_data: Some(raw_data),
+            tile_index,
+        }
+    }
+
+    /// Returns `true` if this bitmap has tiles that haven't been loaded yet.
+    pub fn is_lazy(&self) -> bool {
+        !self.tile_index.is_empty()
+    }
+
+    /// Ensure a single tile is loaded.  If the tile is in the lazy index it
+    /// will be decompressed and moved into `tiles`.  Returns `Ok(true)` if
+    /// the tile was lazily loaded, `Ok(false)` if it was already loaded or
+    /// doesn't exist.
+    pub fn ensure_tile(&mut self, key: &(u16, u16)) -> Result<bool> {
+        if let Some(loc) = self.tile_index.remove(key) {
+            let raw = self
+                .raw_data
+                .as_ref()
+                .expect("raw_data must exist when tile_index is non-empty");
+            let slice = &raw[loc.offset..loc.offset + loc.len];
+            let tile = crate::journey_data::deserialize_tile(slice)?;
+            self.tiles.insert(*key, tile);
+            self.maybe_free_raw_data();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Ensure all lazy tiles are loaded.  After this call, `is_lazy()` returns false.
+    pub fn ensure_all_tiles(&mut self) -> Result<()> {
+        if self.tile_index.is_empty() {
+            return Ok(());
+        }
+        let raw = self
+            .raw_data
+            .as_ref()
+            .expect("raw_data must exist when tile_index is non-empty");
+        let pending: Vec<((u16, u16), TileLocation)> =
+            self.tile_index.drain().collect();
+        for (key, loc) in pending {
+            let slice = &raw[loc.offset..loc.offset + loc.len];
+            let tile = crate::journey_data::deserialize_tile(slice)?;
+            self.tiles.insert(key, tile);
+        }
+        self.raw_data = None;
+        Ok(())
+    }
+
+    /// Free `raw_data` once all lazy tiles have been loaded.
+    fn maybe_free_raw_data(&mut self) {
+        if self.tile_index.is_empty() {
+            self.raw_data = None;
+        }
+    }
+
+    /// Internal: ensure tile is loaded, panicking on error.
+    /// Used in hot paths like `add_line` that don't return Result.
+    fn ensure_tile_or_panic(&mut self, key: &(u16, u16)) {
+        if self.tile_index.contains_key(key) {
+            self.ensure_tile(key)
+                .expect("failed to decompress lazy tile");
+        }
+    }
+
+    /// Check if a tile exists (loaded or lazy).
+    pub fn has_tile(&self, key: &(u16, u16)) -> bool {
+        self.tiles.contains_key(key) || self.tile_index.contains_key(key)
+    }
+
+    /// Get all tile keys (both loaded and lazy).
+    pub fn all_tile_keys(&self) -> Vec<(u16, u16)> {
+        let mut keys: Vec<(u16, u16)> = self.tiles.keys().copied().collect();
+        keys.extend(self.tile_index.keys());
+        keys
     }
 
     // NOTE: `add_line` is cherry picked from: https://github.com/tavimori/fogcore/blob/d0888508e25652164742db8e7d879e651b6607d7/src/fogmaps.rs
@@ -107,6 +224,7 @@ impl JourneyBitmap {
                 let width: u8 = (1.0 / latirad.cos()).round() as u8;
 
                 let tile_pos = ((tile_x % MAP_WIDTH) as u16, tile_y as u16);
+                self.ensure_tile_or_panic(&tile_pos);
                 let tile = self.tiles.entry(tile_pos).or_default();
                 (x, y, px) = tile.add_line(
                     x - (tile_x << ALL_OFFSET),
@@ -149,6 +267,7 @@ impl JourneyBitmap {
                 let latirad = tile_lat * PI / 180.0;
                 let width: u8 = (1.0 / latirad.cos()).round() as u8;
                 let tile_pos = ((tile_x % MAP_WIDTH) as u16, tile_y as u16);
+                self.ensure_tile_or_panic(&tile_pos);
                 let tile = self.tiles.entry(tile_pos).or_default();
                 (x, y, py) = tile.add_line(
                     x - (tile_x << ALL_OFFSET),
@@ -189,8 +308,13 @@ impl JourneyBitmap {
         }
     }
 
-    pub fn merge(&mut self, other_journey_bitmap: JourneyBitmap) {
+    pub fn merge(&mut self, mut other_journey_bitmap: JourneyBitmap) {
+        // Load all lazy tiles from other since we consume it
+        other_journey_bitmap
+            .ensure_all_tiles()
+            .expect("failed to load lazy tiles in merge source");
         for (key, mut other_tile) in other_journey_bitmap.tiles {
+            self.ensure_tile_or_panic(&key);
             match self.tiles.get_mut(&key) {
                 None => {
                     self.tiles.insert(key, other_tile);
@@ -216,7 +340,12 @@ impl JourneyBitmap {
     }
 
     pub fn merge_with_partial_clone(&mut self, other_journey_bitmap: &JourneyBitmap) {
+        debug_assert!(
+            !other_journey_bitmap.is_lazy(),
+            "other bitmap must be fully loaded for merge_with_partial_clone"
+        );
         for (key, other_tile) in &other_journey_bitmap.tiles {
+            self.ensure_tile_or_panic(key);
             match self.tiles.get_mut(key) {
                 None => {
                     self.tiles.insert(*key, other_tile.clone());
@@ -241,7 +370,12 @@ impl JourneyBitmap {
     }
 
     pub fn difference(&mut self, other_journey_bitmap: &JourneyBitmap) {
+        debug_assert!(
+            !other_journey_bitmap.is_lazy(),
+            "other bitmap must be fully loaded for difference"
+        );
         for (tile_key, other_tile) in &other_journey_bitmap.tiles {
+            self.ensure_tile_or_panic(tile_key);
             if let Some(tile) = self.tiles.get_mut(tile_key) {
                 for i in 0..other_tile.blocks.len() {
                     match &other_tile.blocks[i] {
@@ -266,6 +400,14 @@ impl JourneyBitmap {
     }
 
     pub fn intersection(&mut self, other_journey_bitmap: &JourneyBitmap) {
+        debug_assert!(
+            !other_journey_bitmap.is_lazy(),
+            "other bitmap must be fully loaded for intersection"
+        );
+        // Ensure all self tiles are loaded (intersection removes tiles not in other,
+        // and lazy tiles not in other would be silently dropped).
+        self.ensure_all_tiles()
+            .expect("failed to load lazy tiles in intersection");
         self.tiles.retain(
             |tile_key, tile| match other_journey_bitmap.tiles.get(tile_key) {
                 None => false,

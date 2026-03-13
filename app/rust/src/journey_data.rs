@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use anyhow::{Context, Ok, Result};
@@ -7,7 +8,7 @@ use integer_encoding::*;
 use itertools::Itertools;
 
 use crate::{
-    journey_bitmap::{self, Block, BlockKey, JourneyBitmap, Tile},
+    journey_bitmap::{self, Block, BlockKey, JourneyBitmap, Tile, TileLocation},
     journey_header::JourneyType,
     journey_vector::{JourneyVector, TrackPoint, TrackSegment},
 };
@@ -94,6 +95,11 @@ pub fn serialize_journey_bitmap<T: Write>(
     journey_bitmap: &JourneyBitmap,
     mut writer: T,
 ) -> Result<()> {
+    debug_assert!(
+        !journey_bitmap.is_lazy(),
+        "all tiles must be loaded before serialization"
+    );
+
     let serialize_tile = |tile: &Tile| -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         let mut encoder = zstd::Encoder::new(&mut buf, ZSTD_COMPRESS_LEVEL)?.auto_finish();
@@ -142,7 +148,7 @@ pub fn serialize_journey_bitmap<T: Write>(
 }
 
 #[auto_context]
-fn deserialize_tile<T: Read>(reader: T) -> Result<Tile> {
+pub fn deserialize_tile<T: Read>(reader: T) -> Result<Tile> {
     let mut decoder = zstd::Decoder::new(reader)?;
     let mut tile = Tile::new();
     let mut block_keys =
@@ -184,6 +190,40 @@ pub fn deserialize_journey_bitmap<T: Read>(mut reader: T) -> Result<JourneyBitma
     }
 
     Ok(journey_bitmap)
+}
+
+/// Lazily deserialize a journey bitmap from a byte slice.
+/// Only parses the tile index (coordinates + offsets); actual tile data is
+/// decompressed on demand via `JourneyBitmap::ensure_tile()`.
+#[auto_context]
+pub fn deserialize_journey_bitmap_lazy(data: Vec<u8>) -> Result<JourneyBitmap> {
+    let mut cursor = std::io::Cursor::new(&data);
+    validate_magic_header(&mut cursor, &JOURNEY_BITMAP_MAGIC_HEADER)?;
+
+    let tiles_count: u64 = cursor.read_varint()?;
+    let mut tile_index = HashMap::with_capacity(tiles_count as usize);
+
+    for _ in 0..tiles_count {
+        let mut buf: [u8; 2] = [0; 2];
+        cursor.read_exact(&mut buf)?;
+        let tile_x = u16::from_be_bytes(buf);
+
+        cursor.read_exact(&mut buf)?;
+        let tile_y = u16::from_be_bytes(buf);
+
+        let tile_data_len: u64 = cursor.read_varint()?;
+        let offset = cursor.position() as usize;
+        tile_index.insert(
+            (tile_x, tile_y),
+            TileLocation {
+                offset,
+                len: tile_data_len as usize,
+            },
+        );
+        cursor.set_position(cursor.position() + tile_data_len);
+    }
+
+    Ok(JourneyBitmap::from_lazy(data, tile_index))
 }
 
 impl JourneyData {

@@ -113,7 +113,7 @@ impl MapRenderer {
     }
 
     pub fn get_tile_buffer(
-        &self,
+        &mut self,
         x: i64,
         y: i64,
         z: i16,
@@ -121,6 +121,8 @@ impl MapRenderer {
         height: i64,
         buffer_size_power: i16,
     ) -> Result<TileBuffer, String> {
+        // Ensure lazy tiles needed by this viewport are loaded
+        ensure_viewport_tiles(&mut self.journey_bitmap, x, y, z, width, height);
         tile_buffer_from_journey_bitmap(
             &self.journey_bitmap,
             x,
@@ -130,6 +132,49 @@ impl MapRenderer {
             height,
             buffer_size_power,
         )
+    }
+}
+
+const TILE_ZOOM: i16 = 9;
+
+/// Ensure all bitmap tiles needed by a viewport are loaded from lazy storage.
+fn ensure_viewport_tiles(
+    bitmap: &mut JourneyBitmap,
+    view_x: i64,
+    view_y: i64,
+    z: i16,
+    width: i64,
+    height: i64,
+) {
+    if !bitmap.is_lazy() {
+        return;
+    }
+    let zoom_diff = z - TILE_ZOOM;
+    if zoom_diff > 0 {
+        for vy in view_y..view_y + height {
+            for vx in view_x..view_x + width {
+                let key = ((vx >> zoom_diff) as u16, (vy >> zoom_diff) as u16);
+                bitmap
+                    .ensure_tile(&key)
+                    .expect("failed to load lazy tile for viewport");
+            }
+        }
+    } else {
+        let shift = -zoom_diff;
+        for vy in view_y..view_y + height {
+            for vx in view_x..view_x + width {
+                let base_tx = vx << shift;
+                let base_ty = vy << shift;
+                for ty in base_ty..base_ty + (1 << shift) {
+                    for tx in base_tx..base_tx + (1 << shift) {
+                        let key = (tx as u16, ty as u16);
+                        bitmap
+                            .ensure_tile(&key)
+                            .expect("failed to load lazy tile for viewport");
+                    }
+                }
+            }
+        }
     }
 }
 

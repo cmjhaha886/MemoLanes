@@ -56,8 +56,8 @@ fn query_bitmap(
 ) -> Result<Option<JourneyBitmap>> {
     let mut stmt = conn.prepare(sql)?;
     stmt.query_row(params, |row| {
-        let data = row.get_ref(0)?.as_blob()?;
-        Ok(journey_data::deserialize_journey_bitmap(data))
+        let data = row.get_ref(0)?.as_blob()?.to_vec();
+        Ok(journey_data::deserialize_journey_bitmap_lazy(data))
     })
     .optional()?
     .transpose()
@@ -196,6 +196,7 @@ impl CacheDb for CacheDbV1 {
 
         // Merge into the per-kind full cache if it exists.
         if let Some(mut bm) = Self::get_full(&self.conn, &layer_kind)? {
+            bm.ensure_all_tiles()?;
             data.merge_into_with_partial_clone(&mut bm);
             Self::set_full(&self.conn, &layer_kind, &bm)?;
         }
