@@ -270,18 +270,18 @@ pub enum MapRendererProxy {
 }
 
 impl MapRendererProxy {
-    pub fn handle_webview_requests(&self, request: String) -> Result<String> {
+    pub fn handle_webview_requests(&mut self, request: String) -> Result<String> {
         let request = Request::parse(&request)?;
         let response = match self {
             MapRendererProxy::StaticRenderer(map_renderer) => request.handle(map_renderer),
             MapRendererProxy::DynamicRenderer(map_renderer) => {
-                let map_renderer = map_renderer.lock().unwrap();
-                request.handle(&map_renderer)
+                let mut map_renderer = map_renderer.lock().unwrap();
+                request.handle(&mut map_renderer)
             }
             MapRendererProxy::MainMapRenderer => {
-                let main_map_state = get().main_map_state.lock().unwrap();
+                let mut main_map_state = get().main_map_state.lock().unwrap();
                 match main_map_state.dropped_for_power_saving {
-                    false => request.handle(&main_map_state.map_renderer),
+                    false => request.handle(&mut main_map_state.map_renderer),
                     true =>
                     // TODO: This is hacky. I think we should make the type better here for `main_map_state`.
                     // Also have a dedicate value for this case in the response. Right now we reuse the case that

@@ -81,6 +81,10 @@ harness = false
 name = "cache"
 harness = false
 
+[[bench]]
+name = "tile_loading"
+harness = false
+
 [lints.rust]
 # cleanup lints
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

@@ -1,6 +1,6 @@
 use crate::utils;
 use bitvec::prelude::*;
-use std::{clone::Clone, collections::HashMap, mem::take};
+use std::{clone::Clone, collections::HashMap, io::Write, mem::take};
 
 pub const TILE_WIDTH_OFFSET: i16 = 7;
 pub const MAP_WIDTH_OFFSET: i16 = 9;
@@ -190,26 +190,13 @@ impl JourneyBitmap {
     }
 
     pub fn merge(&mut self, other_journey_bitmap: JourneyBitmap) {
-        for (key, mut other_tile) in other_journey_bitmap.tiles {
+        for (key, other_tile) in other_journey_bitmap.tiles {
             match self.tiles.get_mut(&key) {
                 None => {
                     self.tiles.insert(key, other_tile);
                 }
                 Some(self_tile) => {
-                    for i in 0..other_tile.blocks.len() {
-                        match take(&mut other_tile.blocks[i]) {
-                            None => (),
-                            Some(other_block) => match &mut self_tile.blocks[i] {
-                                None => {
-                                    self_tile.blocks[i] = Some(other_block);
-                                }
-                                Some(self_block) => {
-                                    // merge other_block into self_block
-                                    self_block.merge_with(other_block.as_ref());
-                                }
-                            },
-                        }
-                    }
+                    self_tile.merge(other_tile);
                 }
             }
         }
@@ -222,19 +209,7 @@ impl JourneyBitmap {
                     self.tiles.insert(*key, other_tile.clone());
                 }
                 Some(self_tile) => {
-                    for i in 0..other_tile.blocks.len() {
-                        match &other_tile.blocks[i] {
-                            None => (),
-                            Some(other_block) => match &mut self_tile.blocks[i] {
-                                None => {
-                                    self_tile.blocks[i] = Some(other_block.clone());
-                                }
-                                Some(self_block) => {
-                                    self_block.merge_with(other_block.as_ref());
-                                }
-                            },
-                        }
-                    }
+                    self_tile.merge_from(other_tile);
                 }
             }
         }
@@ -243,21 +218,7 @@ impl JourneyBitmap {
     pub fn difference(&mut self, other_journey_bitmap: &JourneyBitmap) {
         for (tile_key, other_tile) in &other_journey_bitmap.tiles {
             if let Some(tile) = self.tiles.get_mut(tile_key) {
-                for i in 0..other_tile.blocks.len() {
-                    match &other_tile.blocks[i] {
-                        None => (),
-                        Some(other_block) => {
-                            if let Some(block) = &mut tile.blocks[i] {
-                                // subtract other_block from block
-                                block.difference_with(other_block.as_ref());
-                                if block.is_empty() {
-                                    tile.blocks[i] = None;
-                                }
-                            }
-                        }
-                    }
-                }
-
+                tile.difference(other_tile);
                 if tile.is_empty() {
                     self.tiles.remove(tile_key);
                 }
@@ -270,20 +231,7 @@ impl JourneyBitmap {
             |tile_key, tile| match other_journey_bitmap.tiles.get(tile_key) {
                 None => false,
                 Some(other_tile) => {
-                    for i in 0..other_tile.blocks.len() {
-                        match &other_tile.blocks[i] {
-                            None => tile.blocks[i] = None,
-                            Some(other_block) => {
-                                if let Some(block) = &mut tile.blocks[i] {
-                                    // intersect block with other_block
-                                    block.intersect_with(other_block.as_ref());
-                                    if block.is_empty() {
-                                        tile.blocks[i] = None;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    tile.intersection(other_tile);
                     !tile.is_empty()
                 }
             },
@@ -319,9 +267,35 @@ impl BlockKey {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+pub type TileBlocks = [Option<Box<Block>>; (TILE_WIDTH * TILE_WIDTH) as usize];
+
+// 3 is the zstd default
+const ZSTD_COMPRESS_LEVEL: i32 = 3;
+
+#[derive(Clone)]
 pub struct Tile {
-    blocks: [Option<Box<Block>>; (TILE_WIDTH * TILE_WIDTH) as usize],
+    raw_data: Vec<u8>,
+}
+
+impl PartialEq for Tile {
+    fn eq(&self, other: &Self) -> bool {
+        // Fast path: identical raw bytes means identical tiles
+        if self.raw_data == other.raw_data {
+            return true;
+        }
+        // Slow path: decompress and compare blocks
+        *self.blocks() == *other.blocks()
+    }
+}
+
+impl Eq for Tile {}
+
+impl std::fmt::Debug for Tile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tile")
+            .field("raw_data_len", &self.raw_data.len())
+            .finish()
+    }
 }
 
 impl Default for Tile {
@@ -332,42 +306,183 @@ impl Default for Tile {
 
 impl Tile {
     pub fn new() -> Self {
+        let blocks: TileBlocks = [const { None }; (TILE_WIDTH * TILE_WIDTH) as usize];
+        Self::from_blocks(&blocks)
+    }
+
+    /// Create a tile from raw compressed data (zstd-compressed tile bytes).
+    pub fn from_raw(data: Vec<u8>) -> Self {
+        Self { raw_data: data }
+    }
+
+    /// Create a tile by serializing blocks into compressed raw data.
+    pub fn from_blocks(blocks: &TileBlocks) -> Self {
         Self {
-            blocks: [const { None }; (TILE_WIDTH * TILE_WIDTH) as usize],
+            raw_data: Self::serialize_blocks(blocks),
         }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (BlockKey, &Block)> {
-        self.blocks.iter().enumerate().filter_map(|(i, block)| {
-            block
-                .as_ref()
-                .map(|block| (BlockKey::from_index(i), block.as_ref()))
-        })
+    /// Returns the raw compressed data.
+    pub fn raw_data(&self) -> &[u8] {
+        &self.raw_data
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (BlockKey, &mut Block)> {
-        self.blocks.iter_mut().enumerate().filter_map(|(i, block)| {
-            block
-                .as_mut()
-                .map(|block| (BlockKey::from_index(i), block.as_mut()))
-        })
+    /// Decompress raw tile data into blocks.
+    pub fn blocks(&self) -> Box<TileBlocks> {
+        use std::io::Read;
+        let mut decoder =
+            zstd::Decoder::new(self.raw_data.as_slice()).expect("failed to create zstd decoder for tile");
+        let mut blocks: Box<TileBlocks> =
+            Box::new([const { None }; (TILE_WIDTH * TILE_WIDTH) as usize]);
+        let mut block_keys = [0_u8; (TILE_WIDTH * TILE_WIDTH / 8) as usize];
+        decoder
+            .read_exact(&mut block_keys)
+            .expect("failed to read block keys from tile data");
+
+        for (byte_index, _val) in block_keys.iter().enumerate() {
+            for offset in 0..8 {
+                if block_keys[byte_index] & (1 << offset) != 0 {
+                    let block_key = BlockKey::from_index(byte_index * 8 + offset);
+                    let mut block_data = [0_u8; BITMAP_SIZE];
+                    decoder
+                        .read_exact(&mut block_data)
+                        .expect("failed to read block data from tile data");
+                    blocks[block_key.index()] = Some(Box::new(Block::new_with_data(block_data)));
+                }
+            }
+        }
+
+        blocks
     }
 
-    pub fn set(&mut self, block_key: BlockKey, block: Block) {
-        self.blocks[block_key.index()] = Some(Box::new(block));
-    }
+    /// Compress blocks into raw tile data.
+    fn serialize_blocks(blocks: &TileBlocks) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut encoder =
+            zstd::Encoder::new(&mut buf, ZSTD_COMPRESS_LEVEL)
+                .expect("failed to create zstd encoder")
+                .auto_finish();
 
-    pub fn get(&self, block_key: BlockKey) -> Option<&Block> {
-        self.blocks[block_key.index()].as_deref()
+        let mut block_keys = [0_u8; (TILE_WIDTH * TILE_WIDTH / 8) as usize];
+        for (i, block) in blocks.iter().enumerate() {
+            if block.is_some() {
+                let byte_index = i / 8;
+                block_keys[byte_index] |= 1 << (i % 8);
+            }
+        }
+        encoder
+            .write_all(&block_keys)
+            .expect("failed to write block keys");
+
+        for (byte_index, _) in block_keys.iter().enumerate() {
+            for offset in 0..8 {
+                if block_keys[byte_index] & (1 << offset) != 0 {
+                    let idx = byte_index * 8 + offset;
+                    let block = blocks[idx].as_ref().unwrap();
+                    encoder
+                        .write_all(&block.data)
+                        .expect("failed to write block data");
+                }
+            }
+        }
+
+        drop(encoder);
+        buf
     }
 
     pub fn is_empty(&self) -> bool {
-        for b in &self.blocks {
+        let blocks = self.blocks();
+        for b in blocks.iter() {
             if b.is_some() {
                 return false;
             }
         }
         true
+    }
+
+    /// Merge `other` into `self` by consuming `other`. Moves blocks where `self` is empty,
+    /// bitwise-ORs where both have data.
+    pub fn merge(&mut self, other: Tile) {
+        let mut self_blocks = self.blocks();
+        let mut other_blocks = other.blocks();
+        for i in 0..other_blocks.len() {
+            match take(&mut other_blocks[i]) {
+                None => (),
+                Some(other_block) => match &mut self_blocks[i] {
+                    None => {
+                        self_blocks[i] = Some(other_block);
+                    }
+                    Some(self_block) => {
+                        self_block.merge_with(other_block.as_ref());
+                    }
+                },
+            }
+        }
+        self.raw_data = Self::serialize_blocks(&self_blocks);
+    }
+
+    /// Merge `other` into `self` by reference. Clones blocks where `self` is empty,
+    /// bitwise-ORs where both have data.
+    pub fn merge_from(&mut self, other: &Tile) {
+        let other_blocks = other.blocks();
+        let mut self_blocks = self.blocks();
+        for i in 0..other_blocks.len() {
+            match &other_blocks[i] {
+                None => (),
+                Some(other_block) => match &mut self_blocks[i] {
+                    None => {
+                        self_blocks[i] = Some(other_block.clone());
+                    }
+                    Some(self_block) => {
+                        self_block.merge_with(other_block.as_ref());
+                    }
+                },
+            }
+        }
+        self.raw_data = Self::serialize_blocks(&self_blocks);
+    }
+
+    /// Subtract `other` from `self` (self = self & !other). Drops empty blocks.
+    pub fn difference(&mut self, other: &Tile) {
+        let other_blocks = other.blocks();
+        let mut self_blocks = self.blocks();
+        for i in 0..other_blocks.len() {
+            if let Some(other_block) = &other_blocks[i] {
+                if let Some(block) = &mut self_blocks[i] {
+                    block.difference_with(other_block.as_ref());
+                    if block.is_empty() {
+                        self_blocks[i] = None;
+                    }
+                }
+            }
+        }
+        self.raw_data = Self::serialize_blocks(&self_blocks);
+    }
+
+    /// Intersect `self` with `other` (self = self & other). Drops empty blocks.
+    pub fn intersection(&mut self, other: &Tile) {
+        let other_blocks = other.blocks();
+        let mut self_blocks = self.blocks();
+        for i in 0..other_blocks.len() {
+            match &other_blocks[i] {
+                None => self_blocks[i] = None,
+                Some(other_block) => {
+                    if let Some(block) = &mut self_blocks[i] {
+                        block.intersect_with(other_block.as_ref());
+                        if block.is_empty() {
+                            self_blocks[i] = None;
+                        }
+                    }
+                }
+            }
+        }
+        self.raw_data = Self::serialize_blocks(&self_blocks);
+    }
+
+    pub fn set(&mut self, block_key: BlockKey, block: Block) {
+        let mut blocks = self.blocks();
+        blocks[block_key.index()] = Some(Box::new(block));
+        self.raw_data = Self::serialize_blocks(&blocks);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -383,6 +498,7 @@ impl Tile {
         quadrants13: bool,
         width: u8,
     ) -> (i64, i64, i64) {
+        let mut blocks = self.blocks();
         let mut p = p;
         let mut x = x;
         let mut y = y;
@@ -401,7 +517,7 @@ impl Tile {
 
                 let block_key = BlockKey::from_x_y(block_x as u8, block_y as u8);
 
-                let block = &mut self.blocks[block_key.index()]
+                let block = &mut blocks[block_key.index()]
                     .get_or_insert_with(|| Box::new(Block::new()));
 
                 (x, y, p) = block.add_line(
@@ -437,7 +553,7 @@ impl Tile {
 
                 let block_key = BlockKey::from_x_y(block_x as u8, block_y as u8);
 
-                let block = &mut self.blocks[block_key.index()]
+                let block = &mut blocks[block_key.index()]
                     .get_or_insert_with(|| Box::new(Block::new()));
 
                 (x, y, p) = block.add_line(
@@ -459,6 +575,7 @@ impl Tile {
                 }
             }
         }
+        self.raw_data = Self::serialize_blocks(&blocks);
         (x, y, p)
     }
 }

@@ -6,11 +6,20 @@ const START_LAT: f64 = -33.793291910360125;
 const END_LNG: f64 = 132.1435370795134;
 const END_LAT: f64 = -55.793291910360125;
 
+fn compute_area(bitmap: &JourneyBitmap) -> u64 {
+    let tiles = bitmap
+        .tiles
+        .iter()
+        .map(|(pos, tile)| (*pos, tile.blocks()))
+        .collect();
+    journey_area_utils::compute_journey_bitmap_area_from_tiles(&tiles, None)
+}
+
 #[test]
 fn test_compute_journey_bitmap_area() {
     let (bitmap_import, _warnings) =
         import_data::load_fow_sync_data("./tests/data/fow_1.zip").unwrap();
-    let calculated_area = journey_area_utils::compute_journey_bitmap_area(&bitmap_import, None);
+    let calculated_area = compute_area(&bitmap_import);
     assert_eq!(calculated_area, 3035670); // area unit: m^2
 }
 
@@ -32,7 +41,7 @@ fn partial_update_use_cached_and_recompute_touched_tiles_only() {
     let mut full_journey_bitmap = JourneyBitmap::new();
     full_journey_bitmap.add_line(START_LNG, START_LAT, END_LNG, END_LAT);
     full_journey_bitmap.add_line(START_LNG, END_LAT, END_LNG, START_LAT);
-    let full_area = journey_area_utils::compute_journey_bitmap_area(&full_journey_bitmap, None);
+    let full_area = compute_area(&full_journey_bitmap);
 
     println!("update_area = {update_area}");
     println!("full_area = {full_area}");
@@ -58,6 +67,6 @@ fn validate_area_after_map_renderer_replace() {
 
     map_renderer.replace(bitmap_import.clone());
 
-    let calculated_area = journey_area_utils::compute_journey_bitmap_area(&bitmap_import, None);
+    let calculated_area = compute_area(&bitmap_import);
     assert_eq!(map_renderer.get_current_area(), calculated_area); // area unit: m^2
 }

@@ -1,4 +1,6 @@
-use crate::journey_bitmap::{Block, BlockKey, JourneyBitmap, Tile};
+use std::collections::HashMap;
+
+use crate::journey_bitmap::{Block, BlockKey, TileBlocks};
 use crate::journey_bitmap::{BITMAP_WIDTH, BITMAP_WIDTH_OFFSET, TILE_WIDTH_OFFSET};
 
 const TILE_ZOOM: i16 = 9;
@@ -10,7 +12,7 @@ impl TileShader2 {
     pub fn get_pixels_coordinates(
         start_x: u32,
         start_y: u32,
-        journey_bitmap: &JourneyBitmap,
+        tiles: &HashMap<(u16, u16), Box<TileBlocks>>,
         view_x: i64,
         view_y: i64,
         zoom: i16,
@@ -39,8 +41,7 @@ impl TileShader2 {
             for j in 0..(1 << std::cmp::max(-zoom_diff_view_to_tile, 0)) {
                 // draw tile tile_x+i, tile_y+j
 
-                if let Some(tile) = journey_bitmap
-                    .tiles
+                if let Some(tile) = tiles
                     .get(&((tile_x + i) as u16, (tile_y + j) as u16))
                 {
                     // if zoom_diff_view_to_tile > 0, view zoom larger, view region smaller, draw a portion of a single tile.
@@ -65,7 +66,7 @@ impl TileShader2 {
                     };
                     Self::add_tile_pixels(
                         &mut pixels,
-                        tile,
+                        tile.as_ref(),
                         start_x as i64 + x0,
                         start_y as i64 + y0,
                         sub_tile_x_idx,
@@ -84,7 +85,7 @@ impl TileShader2 {
     #[allow(clippy::too_many_arguments)]
     fn add_tile_pixels(
         pixels: &mut Vec<(i64, i64)>,
-        tile: &Tile,
+        blocks: &TileBlocks,
         start_x: i64,
         start_y: i64,
         sub_tile_x_idx: i64,
@@ -137,10 +138,11 @@ impl TileShader2 {
 
             for i in 0..(1 << std::cmp::max(block_num_power, 0)) {
                 for j in 0..(1 << std::cmp::max(block_num_power, 0)) {
-                    if let Some(block) = tile.get(BlockKey::from_x_y(
+                    let block_key = BlockKey::from_x_y(
                         (block_start_x + i) as u8,
                         (block_start_y + j) as u8,
-                    )) {
+                    );
+                    if let Some(block) = blocks[block_key.index()].as_deref() {
                         let (offset_x, offset_y) = if block_width_power >= 0 {
                             (i << block_width_power, j << block_width_power)
                         } else {

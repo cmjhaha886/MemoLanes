@@ -3,6 +3,16 @@ use memolanes_core::{
     gps_processor::SegmentGapRule, import_data, journey_area_utils, journey_bitmap::JourneyBitmap,
 };
 
+fn deserialize_all_tiles(
+    bitmap: &JourneyBitmap,
+) -> std::collections::HashMap<(u16, u16), Box<memolanes_core::journey_bitmap::TileBlocks>> {
+    bitmap
+        .tiles
+        .iter()
+        .map(|(pos, tile)| (*pos, tile.blocks()))
+        .collect()
+}
+
 fn journey_area_calculation(c: &mut Criterion) {
     let mut group = c.benchmark_group("area_calculation");
     group.sample_size(10);
@@ -11,9 +21,9 @@ fn journey_area_calculation(c: &mut Criterion) {
         let (bitmap_import, _warnings) =
             import_data::load_fow_sync_data("./tests/data/fow_1.zip").unwrap();
         b.iter(|| {
-            std::hint::black_box(journey_area_utils::compute_journey_bitmap_area(
-                &bitmap_import,
-                None,
+            let tiles = deserialize_all_tiles(&bitmap_import);
+            std::hint::black_box(journey_area_utils::compute_journey_bitmap_area_from_tiles(
+                &tiles, None,
             ))
         })
     });
@@ -30,9 +40,9 @@ fn journey_area_calculation(c: &mut Criterion) {
             let mut journey_bitmap = JourneyBitmap::new();
             journey_bitmap.merge_vector(&journey_vector);
             b.iter(|| {
-                std::hint::black_box(journey_area_utils::compute_journey_bitmap_area(
-                    &journey_bitmap,
-                    None,
+                let tiles = deserialize_all_tiles(&journey_bitmap);
+                std::hint::black_box(journey_area_utils::compute_journey_bitmap_area_from_tiles(
+                    &tiles, None,
                 ))
             })
         },

@@ -1,12 +1,16 @@
 use journey_kernel::TileBuffer;
 
 use crate::journey_area_utils;
-use crate::journey_bitmap::{JourneyBitmap, Tile};
+use crate::journey_bitmap::{JourneyBitmap, Tile, TileBlocks};
 use crate::renderer::tile_shader2::TileShader2;
 use std::collections::HashMap;
 
 pub struct MapRenderer {
     journey_bitmap: JourneyBitmap,
+    /// Cache of deserialized tiles for rendering. Only tiles that have been
+    /// accessed for rendering are stored here. Tiles are deserialized from
+    /// the journey_bitmap's raw tile data on first access.
+    tile_cache: HashMap<(u16, u16), Box<TileBlocks>>,
     /* for each tile of 512*512 tiles in a JourneyBitmap, use buffered area to record any update */
     tile_area_cache: HashMap<(u16, u16), f64>,
     version: u64,
@@ -15,10 +19,11 @@ pub struct MapRenderer {
 
 impl MapRenderer {
     pub fn new(journey_bitmap: JourneyBitmap) -> Self {
-        let mut journey_bitmap = journey_bitmap;
+                let mut journey_bitmap = journey_bitmap;
         Self::prepare_journey_bitmap_for_rendering(&mut journey_bitmap);
         Self {
             journey_bitmap,
+            tile_cache: HashMap::new(),
             tile_area_cache: HashMap::new(),
             version: 0,
             current_area: None,
@@ -34,6 +39,20 @@ impl MapRenderer {
     fn prepare_tiles_for_rendering(_tile: &mut Tile) {
         // just a place holder for future implementation
     }
+    
+
+    /// Ensure a tile is in the cache (deserialized). Returns true if the tile exists.
+    fn ensure_tile_cached(&mut self, pos: (u16, u16)) -> bool {
+        if self.tile_cache.contains_key(&pos) {
+            return true;
+        }
+        if let Some(tile) = self.journey_bitmap.tiles.get(&pos) {
+            self.tile_cache.insert(pos, tile.blocks());
+            true
+        } else {
+            false
+        }
+    }
 
     pub fn update<F>(&mut self, f: F)
     where
@@ -48,12 +67,9 @@ impl MapRenderer {
         // Apply the update function
         f(&mut self.journey_bitmap, &mut tile_changed);
 
-        // Now prepare tiles for rendering for all changed tiles
+        // Invalidate cache for changed tiles
         for tile_pos in changed_tiles {
-            if let Some(tile) = self.journey_bitmap.tiles.get_mut(&tile_pos) {
-                Self::prepare_tiles_for_rendering(tile);
-            }
-            // Invalidate cache for this tile
+            self.tile_cache.remove(&tile_pos);
             self.tile_area_cache.remove(&tile_pos);
         }
 
@@ -62,9 +78,8 @@ impl MapRenderer {
     }
 
     pub fn replace(&mut self, journey_bitmap: JourneyBitmap) {
-        let mut journey_bitmap = journey_bitmap;
-        Self::prepare_journey_bitmap_for_rendering(&mut journey_bitmap);
         self.journey_bitmap = journey_bitmap;
+        self.tile_cache.clear();
         self.tile_area_cache.clear();
         self.reset();
     }
@@ -104,16 +119,24 @@ impl MapRenderer {
     }
 
     pub fn get_current_area(&mut self) -> u64 {
+        // Ensure all tiles are cached (deserialized) for area computation
+        let positions: Vec<_> = self.journey_bitmap.tiles.keys().cloned().collect();
+        for pos in positions {
+            self.ensure_tile_cached(pos);
+        }
+
+        let tile_cache = &self.tile_cache;
+        let tile_area_cache = &mut self.tile_area_cache;
         *self.current_area.get_or_insert_with(|| {
-            journey_area_utils::compute_journey_bitmap_area(
-                &self.journey_bitmap,
-                Some(&mut self.tile_area_cache),
+            journey_area_utils::compute_journey_bitmap_area_from_tiles(
+                tile_cache,
+                Some(tile_area_cache),
             )
         })
     }
 
     pub fn get_tile_buffer(
-        &self,
+        &mut self,
         x: i64,
         y: i64,
         z: i16,
@@ -121,8 +144,11 @@ impl MapRenderer {
         height: i64,
         buffer_size_power: i16,
     ) -> Result<TileBuffer, String> {
-        tile_buffer_from_journey_bitmap(
-            &self.journey_bitmap,
+        // Pre-cache tiles needed for this viewport
+        self.cache_viewport_tiles(x, y, z, width, height);
+
+        tile_buffer_from_tile_cache(
+            &self.tile_cache,
             x,
             y,
             z,
@@ -131,11 +157,47 @@ impl MapRenderer {
             buffer_size_power,
         )
     }
+
+    /// Pre-populate the tile cache with tiles needed for a given viewport.
+    fn cache_viewport_tiles(&mut self, x: i64, y: i64, z: i16, width: i64, height: i64) {
+        let zoom_coefficient = 1i64 << z;
+        let tile_zoom: i16 = 9;
+        let zoom_diff = z - tile_zoom;
+
+        for tile_y in y..(y + height) {
+            for tile_x in x..(x + width) {
+                let tile_x_rounded =
+                    ((tile_x % zoom_coefficient) + zoom_coefficient) % zoom_coefficient;
+
+                // Calculate which bitmap tiles this viewport tile maps to
+                let (bm_tile_x, bm_tile_y) = if zoom_diff > 0 {
+                    (
+                        tile_x_rounded >> zoom_diff,
+                        tile_y >> zoom_diff,
+                    )
+                } else {
+                    (
+                        tile_x_rounded << -zoom_diff,
+                        tile_y << -zoom_diff,
+                    )
+                };
+
+                // Cache all sub-tiles if zoomed out
+                let sub_count = 1i64 << std::cmp::max(-zoom_diff, 0);
+                for i in 0..sub_count {
+                    for j in 0..sub_count {
+                        let pos = ((bm_tile_x + i) as u16, (bm_tile_y + j) as u16);
+                        self.ensure_tile_cached(pos);
+                    }
+                }
+            }
+        }
+    }
 }
 
-/// Create a new TileBuffer from a JourneyBitmap for a range of tiles
-fn tile_buffer_from_journey_bitmap(
-    journey_bitmap: &JourneyBitmap,
+/// Create a new TileBuffer from the tile cache for a range of tiles
+fn tile_buffer_from_tile_cache(
+    tile_cache: &HashMap<(u16, u16), Box<TileBlocks>>,
     x: i64,
     y: i64,
     z: i16,
@@ -196,11 +258,11 @@ fn tile_buffer_from_journey_bitmap(
             let tile_x_rounded =
                 ((tile_x % zoom_coefficient) + zoom_coefficient) % zoom_coefficient;
 
-            // Get the pixels using TileShader2
+            // Get the pixels using TileShader2, looking up tiles from the cache
             let pixels = TileShader2::get_pixels_coordinates(
                 0,
                 0,
-                journey_bitmap,
+                tile_cache,
                 tile_x_rounded,
                 tile_y,
                 z,

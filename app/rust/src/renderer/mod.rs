@@ -1,4 +1,4 @@
-use crate::journey_bitmap::{JourneyBitmap, MAP_WIDTH_OFFSET, TILE_WIDTH, TILE_WIDTH_OFFSET};
+use crate::journey_bitmap::{BlockKey, JourneyBitmap, MAP_WIDTH_OFFSET, TILE_WIDTH, TILE_WIDTH_OFFSET};
 use crate::utils;
 
 pub mod map_renderer;
@@ -26,22 +26,27 @@ pub fn get_default_camera_option_from_journey_bitmap(
         .next()
         .and_then(|(tile_pos, tile)| {
             // we shouldn't have empty tile or block
-            tile.iter().next().map(|(block_key, _)| {
-                let blockzoomed_x: i32 =
-                    TILE_WIDTH as i32 * tile_pos.0 as i32 + block_key.x() as i32;
-                let blockzoomed_y: i32 =
-                    TILE_WIDTH as i32 * tile_pos.1 as i32 + block_key.y() as i32;
-                let (lng, lat) = utils::tile_x_y_to_lng_lat(
-                    blockzoomed_x,
-                    blockzoomed_y,
-                    (TILE_WIDTH_OFFSET + MAP_WIDTH_OFFSET) as i32,
-                );
-                CameraOptionInternal {
-                    zoom: 12.0,
-                    lng,
-                    lat,
-                }
-            })
+            let blocks = tile.blocks();
+            blocks
+                .iter()
+                .enumerate()
+                .find_map(|(i, block)| block.as_ref().map(|_| BlockKey::from_index(i)))
+                .map(|block_key| {
+                    let blockzoomed_x: i32 =
+                        TILE_WIDTH as i32 * tile_pos.0 as i32 + block_key.x() as i32;
+                    let blockzoomed_y: i32 =
+                        TILE_WIDTH as i32 * tile_pos.1 as i32 + block_key.y() as i32;
+                    let (lng, lat) = utils::tile_x_y_to_lng_lat(
+                        blockzoomed_x,
+                        blockzoomed_y,
+                        (TILE_WIDTH_OFFSET + MAP_WIDTH_OFFSET) as i32,
+                    );
+                    CameraOptionInternal {
+                        zoom: 12.0,
+                        lng,
+                        lat,
+                    }
+                })
         })
 }
 

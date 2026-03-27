@@ -167,6 +167,7 @@ impl TileShader {
             sub_image.put_pixel(start_x as u32, start_y as u32, fg_color);
         } else {
             // the tile occupies more than one pixel, currently all the blocks will be used to render。
+            let blocks = tile.blocks();
 
             let block_num_power = TILE_WIDTH_OFFSET - zoom_factor; // number of block in a row of the view
             let (block_start_x, block_start_y) = if block_num_power >= 0 {
@@ -192,10 +193,11 @@ impl TileShader {
 
             for i in 0..(1 << std::cmp::max(block_num_power, 0)) {
                 for j in 0..(1 << std::cmp::max(block_num_power, 0)) {
-                    if let Some(block) = tile.get(BlockKey::from_x_y(
+                    let block_key = BlockKey::from_x_y(
                         (block_start_x + i) as u8,
                         (block_start_y + j) as u8,
-                    )) {
+                    );
+                    if let Some(block) = blocks[block_key.index()].as_deref() {
                         let (offset_x, offset_y) = if block_width_power >= 0 {
                             (i << block_width_power, j << block_width_power)
                         } else {
